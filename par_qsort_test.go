@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -14,38 +15,44 @@ const maxWorkers = 4
 type Job func()
 
 type WorkerPool struct {
-	jobQueue   chan Job // Каналы задач для разных уровней
-	maxWorkers int
+	enqueue func(Job)
+	jobs    chan Job
 }
 
 func NewWorkerPool(maxWorkers int) *WorkerPool {
 
-	pool := &WorkerPool{
-		jobQueue:   make(chan Job),
-		maxWorkers: maxWorkers,
-	}
+	jobs := make(chan Job)
+	var enqueue func(Job)
 
-	// Запускаем воркеров для каждого уровня рекурсии
+	// workers
 	for i := 0; i < maxWorkers; i++ {
-		go pool.worker()
+		go func() {
+			for j := range jobs {
+				j()
+			}
+		}()
 	}
-	return pool
+
+	enqueue = func(j Job) {
+		select {
+		case jobs <- j: // another worker took it
+		default: // no free worker; do the job now
+			j()
+		}
+	}
+
+	return &WorkerPool{
+		enqueue: enqueue,
+		jobs:    jobs,
+	}
 }
 
-func (pool *WorkerPool) worker() {
-	for job := range pool.jobQueue {
-		job()
-	}
-}
-
-// Add добавляет задачу в очередь и увеличивает счетчик WaitGroup
 func (pool *WorkerPool) Add(job Job) {
-	pool.jobQueue <- job
+	pool.enqueue(job)
 }
 
-// Wait дожидается выполнения всех задач
 func (pool *WorkerPool) Wait() {
-	close(pool.jobQueue) // Закрываем канал после выполнения всех задач
+	close(pool.jobs)
 }
 
 func scan(pool *WorkerPool, arr []int) []int {
@@ -126,26 +133,35 @@ func mapFunc(pool *WorkerPool, a []int, f func(int) bool) []int {
 	return b
 }
 
-func filter(pool *WorkerPool, a []int, f func(int) bool) []int {
-	flags := mapFunc(pool, a, f)
-	sums := scan(pool, flags)
-	ans := make([]int, sums[len(sums)-1])
+// func filter(pool *WorkerPool, a []int, f func(int) bool) []int {
+// 	flags := mapFunc(pool, a, f)
+// 	sums := scan(pool, flags)
+// 	ans := make([]int, sums[len(sums)-1])
+//
+// 	wg := sync.WaitGroup{}
+// 	for i := range a {
+// 		if flags[i] == 1 {
+// 			i := i
+// 			wg.Add(1)
+// 			pool.Add(
+// 				func() {
+// 					defer wg.Done()
+// 					ans[sums[i]] = a[i]
+// 				},
+// 			)
+// 		}
+// 	}
+// 	wg.Wait()
+// 	return ans
+// }
 
-	wg := sync.WaitGroup{}
-	for i := range a {
-		if flags[i] == 1 {
-			i := i
-			wg.Add(1)
-			pool.Add(
-				func() {
-					defer wg.Done()
-					ans[sums[i]] = a[i]
-				},
-			)
+func filter(pool *WorkerPool, a []int, f func(int) bool) (ret []int) {
+	for _, item := range a {
+		if f(item) {
+			ret = append(ret, item)
 		}
 	}
-	wg.Wait()
-	return ans
+	return
 }
 
 func parQuickSort(pool *WorkerPool, A []int) []int {
@@ -187,8 +203,9 @@ func parQuickSort(pool *WorkerPool, A []int) []int {
 }
 
 func TestParQuickSortPerformance(t *testing.T) {
-	const NumTests = 1
-	const ArrSize = 1000
+	const NumTests = 5
+	const ArrSize = 100000000
+	runtime.GOMAXPROCS(4)
 
 	arr := generateRandomArray(ArrSize)
 	var durations []time.Duration
